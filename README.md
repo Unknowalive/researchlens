@@ -97,12 +97,23 @@ for i, page in enumerate(pages):
 
 ---
 
+## � Recent Update: Bug Fixes and Improvements
+
+During the latest backend update, the app was failing while processing uploaded PDFs. The root cause was that some PDF files produced no extractable text or no semantic chunks, which caused the indexing pipeline to crash.
+
+Improvements made:
+
+- Added robust PDF ingestion validation to detect files with no selectable text and report a clear error.
+- Added a guard against empty chunk sets so the app fails gracefully if chunking produces no data.
+- Improved the `VectorRetriever` compatibility wrapper to handle empty indexes without breaking.
+- Strengthened Streamlit backend validation so users receive meaningful feedback instead of low-level exceptions.
+
+These updates make the document processing flow more reliable and easier to debug for edge-case PDFs.
+
+---
+
 ## 📌 Note
 
 This repository now focuses on a manual, transparent RAG backend (no extractive QA). The generative QA stage is strictly instructed to synthesize answers only from provided context chunks and to include explicit SOURCES mapping.
 
 **Attribution:** This work is an update based on the original repository at https://github.com/DeekshaChat/researchlens/ and includes modifications made locally for the Research Lens backend.
-<<<<<<< HEAD
-=======
-
->>>>>>> d152dbb (docs: add attribution noting updates based on DeekshaChat/researchlens)
