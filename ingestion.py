@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Iterable, Dict
+from typing import List, Dict
 import re
 import collections
 
 try:
-    # Prefer a layout-aware parser if installed (marker-pdf recommended)
     import marker_pdf  # type: ignore
     _HAS_MARKER = True
 except Exception:
@@ -26,192 +25,192 @@ class PageBlock:
 
 
 class EmptyDocumentError(ValueError):
-    """Raised when a PDF contains no extractable body text after layout-aware parsing."""
+    """Raised when a PDF contains insufficient extractable body text."""
 
 
 class PDFLayoutParser:
-    """Layout-aware PDF parser.
+    """Layout-aware parser for academic PDFs.
 
-    - Prefers `marker_pdf` when available (install separately).
-    - Falls back to `pdfplumber` while keeping layout heuristics.
-    - Detects and removes repeated headers/footers.
-    - Handles two-column pages by column clustering and left->right reading order.
-    - Attempts to preserve math-like blocks and LaTeX fragments.
+    Uses `marker_pdf` when available and falls back to `pdfplumber`.
+    Drops repeated headers and footers, handles two-column text flows,
+    preserves math/citation blocks, and validates extracted content.
     """
 
     header_footer_threshold = 0.6
-
-    def __init__(self) -> None:
-        pass
 
     def parse(self, path: str) -> List[str]:
         if _HAS_MARKER:
             pages = self._parse_with_marker(path)
         else:
             pages = self._parse_with_pdfplumber(path)
+
+        pages = [self._normalize_text(page) for page in pages if page.strip()]
         self._validate_document(pages)
         return pages
 
     def _parse_with_marker(self, path: str) -> List[str]:
-        # marker_pdf API details may vary; this is a best-effort adapter.
         doc = marker_pdf.load(path)
-        pages_text: List[str] = []
         blocks_by_page: Dict[int, List[PageBlock]] = collections.defaultdict(list)
-        for i, page in enumerate(doc.pages, start=1):
-            for block in page.blocks:
-                blocks_by_page[i].append(
-                    PageBlock(text=block.text.strip(), x0=block.x0, top=block.top, x1=block.x1, bottom=block.bottom, page_no=i)
+
+        for page_no, page in enumerate(doc.pages, start=1):
+            for block in getattr(page, "blocks", []):
+                text = str(getattr(block, "text", "") or "").strip()
+                if not text:
+                    continue
+                blocks_by_page[page_no].append(
+                    PageBlock(
+                        text=text,
+                        x0=float(getattr(block, "x0", 0.0)),
+                        top=float(getattr(block, "top", 0.0)),
+                        x1=float(getattr(block, "x1", 0.0)),
+                        bottom=float(getattr(block, "bottom", 0.0)),
+                        page_no=page_no,
+                    )
                 )
 
-        cleaned = self._process_pages(blocks_by_page)
-        for p in sorted(cleaned.keys()):
-            pages_text.append(cleaned[p])
-        return pages_text
+        return self._render_pages(blocks_by_page)
 
     def _parse_with_pdfplumber(self, path: str) -> List[str]:
         blocks_by_page: Dict[int, List[PageBlock]] = collections.defaultdict(list)
-        try:
-            with pdfplumber.open(path) as pdf:
-                for i, page in enumerate(pdf.pages, start=1):
-                    # extract words with bounding boxes
-                    words = page.extract_words(use_text_flow=True)
-                    if not words:
-                        # fallback to simple text
-                        text = page.extract_text() or ""
-                        blocks_by_page[i].append(PageBlock(text=text.strip(), x0=0, top=0, x1=page.width, bottom=page.height, page_no=i))
+
+        with pdfplumber.open(path) as pdf:
+            for page_no, page in enumerate(pdf.pages, start=1):
+                words = page.extract_words(use_text_flow=True)
+                if not words:
+                    text = str(page.extract_text() or "").strip()
+                    if text:
+                        blocks_by_page[page_no].append(
+                            PageBlock(
+                                text=text,
+                                x0=0.0,
+                                top=0.0,
+                                x1=float(page.width or 0.0),
+                                bottom=float(page.height or 0.0),
+                                page_no=page_no,
+                            )
+                        )
+                    continue
+
+                lines: Dict[int, List[dict]] = collections.defaultdict(list)
+                for word in words:
+                    top_key = int(round(float(word.get("top", 0.0))))
+                    lines[top_key].append(word)
+
+                for top_key in sorted(lines):
+                    line_words = sorted(lines[top_key], key=lambda w: float(w.get("x0", 0.0)))
+                    text = " ".join(str(w.get("text", "")) for w in line_words).strip()
+                    if not text or self._is_page_number(text):
                         continue
+                    blocks_by_page[page_no].append(
+                        PageBlock(
+                            text=text,
+                            x0=float(line_words[0].get("x0", 0.0)),
+                            top=float(line_words[0].get("top", 0.0)),
+                            x1=float(line_words[-1].get("x1", 0.0)),
+                            bottom=float(line_words[0].get("bottom", page.height or 0.0)),
+                            page_no=page_no,
+                        )
+                    )
 
-                    # group words into lines by their top coordinate
-                    lines: Dict[int, List[dict]] = collections.defaultdict(list)
-                    for w in words:
-                        top_rounded = int(round(float(w.get("top", 0))))
-                        lines[top_rounded].append(w)
+        return self._render_pages(blocks_by_page)
 
-                    for top_k in sorted(lines.keys()):
-                        line_words = sorted(lines[top_k], key=lambda w: float(w.get("x0", 0)))
-                        text = " ".join(w.get("text", "") for w in line_words).strip()
-                        if not text:
-                            continue
-                        x0 = float(line_words[0].get("x0", 0))
-                        x1 = float(line_words[-1].get("x1", 0))
-                        top = float(line_words[0].get("top", 0))
-                        bottom = float(line_words[0].get("bottom", page.height))
-                        blocks_by_page[i].append(PageBlock(text=text, x0=x0, top=top, x1=x1, bottom=bottom, page_no=i))
-        except Exception as exc:
-            raise ValueError(
-                f"Failed to parse PDF at {path}: {exc}. "
-                "The file may not be a valid PDF or may contain only scanned images."
-            ) from exc
+    def _render_pages(self, blocks_by_page: Dict[int, List[PageBlock]]) -> List[str]:
+        headers, footers = self._find_repeating_headers_footers(blocks_by_page)
+        pages: Dict[int, str] = {}
 
-        cleaned = self._process_pages(blocks_by_page)
-        pages_text = [cleaned[p] for p in sorted(cleaned.keys())]
-        return pages_text
+        for page_no, blocks in blocks_by_page.items():
+            if not blocks:
+                pages[page_no] = ""
+                continue
 
-    def _validate_document(self, pages_text: List[str]) -> None:
-        full_text = "\n\n".join(pages_text).strip()
-        if not full_text or len(full_text) < 100 or not re.search(r"[A-Za-z0-9]", full_text):
-            raise EmptyDocumentError(
-                f"PDF parsing yielded insufficient extractable text ({len(full_text)} chars). "
-                "This may be a scanned image PDF, invalid file, or a document with only headers/footers."
-            )
+            columns = self._cluster_columns(blocks)
+            ordered_blocks = columns[0] + columns[1] if columns[1] else columns[0]
 
-    def _process_pages(self, blocks_by_page: Dict[int, List[PageBlock]]) -> Dict[int, str]:
-        # Identify repeated header/footer candidates
+            filtered: List[PageBlock] = []
+            for block in ordered_blocks:
+                if block.text in headers or block.text in footers or self._is_page_number(block.text):
+                    continue
+                filtered.append(block)
+
+            paragraphs: List[str] = []
+            buffer: List[str] = []
+            for block in filtered:
+                text = block.text
+                if buffer and buffer[-1].endswith("-"):
+                    buffer[-1] = buffer[-1][:-1] + text
+                else:
+                    buffer.append(text)
+
+                if self._is_paragraph_break(text):
+                    joined = " ".join(buffer).strip()
+                    if not self._has_unbalanced_math(joined):
+                        paragraphs.append(joined)
+                        buffer = []
+
+            if buffer:
+                paragraphs.append(" ".join(buffer).strip())
+
+            pages[page_no] = "\n\n".join(paragraphs)
+
+        return [pages[page_no] for page_no in sorted(pages)]
+
+    def _find_repeating_headers_footers(self, blocks_by_page: Dict[int, List[PageBlock]]) -> tuple[set[str], set[str]]:
         top_texts = collections.Counter()
         bottom_texts = collections.Counter()
         page_count = len(blocks_by_page)
 
-        for p, blocks in blocks_by_page.items():
+        for blocks in blocks_by_page.values():
             if not blocks:
                 continue
-            # top 10% and bottom 10% heuristics
-            page_height = max(b.bottom for b in blocks) if blocks else 1
-            top_zone = [b.text for b in blocks if b.top <= page_height * 0.12]
-            bottom_zone = [b.text for b in blocks if b.bottom >= page_height * 0.88]
-            if top_zone:
-                top_texts.update(top_zone)
-            if bottom_zone:
-                bottom_texts.update(bottom_zone)
+            page_height = max(block.bottom for block in blocks) or 1.0
+            top_zone = [block.text for block in blocks if block.top <= page_height * 0.12]
+            bottom_zone = [block.text for block in blocks if block.bottom >= page_height * 0.88]
+            top_texts.update(top_zone)
+            bottom_texts.update(bottom_zone)
 
-        headers = {t for t, c in top_texts.items() if c / max(1, page_count) >= self.header_footer_threshold}
-        footers = {t for t, c in bottom_texts.items() if c / max(1, page_count) >= self.header_footer_threshold}
+        headers = {text for text, count in top_texts.items() if count / max(1, page_count) >= self.header_footer_threshold}
+        footers = {text for text, count in bottom_texts.items() if count / max(1, page_count) >= self.header_footer_threshold}
+        return headers, footers
 
-        cleaned_pages: Dict[int, str] = {}
-        for p, blocks in blocks_by_page.items():
-            if not blocks:
-                cleaned_pages[p] = ""
-                continue
+    def _cluster_columns(self, blocks: List[PageBlock]) -> Dict[int, List[PageBlock]]:
+        x0_values = [block.x0 for block in blocks]
+        if len(x0_values) < 8:
+            return {0: sorted(blocks, key=lambda b: b.top), 1: []}
 
-            # detect columns: examine x0 distribution; if bimodal -> two columns
-            x0s = [b.x0 for b in blocks]
-            # simple heuristic: if variance of x0 is large and there are gaps, assume two columns
-            columns: Dict[int, List[PageBlock]] = {0: [], 1: []}
-            if len(blocks) >= 8:
-                # split by median x0
-                median_x = sorted(x0s)[len(x0s) // 2]
-                left = [b for b in blocks if b.x0 <= median_x]
-                right = [b for b in blocks if b.x0 > median_x]
-                if left and right:
-                    columns[0] = sorted(left, key=lambda b: b.top)
-                    columns[1] = sorted(right, key=lambda b: b.top)
-                else:
-                    columns[0] = sorted(blocks, key=lambda b: b.top)
-            else:
-                columns[0] = sorted(blocks, key=lambda b: b.top)
+        median_x0 = sorted(x0_values)[len(x0_values) // 2]
+        left = [block for block in blocks if block.x0 <= median_x0]
+        right = [block for block in blocks if block.x0 > median_x0]
 
-            # Build reading order: left column top->bottom then right column
-            ordered_blocks: List[PageBlock] = []
-            if columns[1]:
-                ordered_blocks.extend(columns[0])
-                ordered_blocks.extend(columns[1])
-            else:
-                ordered_blocks = columns[0]
+        if not left or not right:
+            return {0: sorted(blocks, key=lambda b: b.top), 1: []}
 
-            # Drop headers/footers
-            filtered_blocks: List[PageBlock] = []
-            for b in ordered_blocks:
-                if b.text in headers or b.text in footers:
-                    continue
-                filtered_blocks.append(b)
+        return {0: sorted(left, key=lambda b: b.top), 1: sorted(right, key=lambda b: b.top)}
 
-            # Merge nearby lines into paragraphs; preserve math and citations intact
-            paragraphs: List[str] = []
-            cur_lines: List[str] = []
-            for b in filtered_blocks:
-                text = b.text
-                if self._is_page_separator(text):
-                    continue
-                # if line ends with hyphen likely a broken word — join without space
-                if cur_lines and cur_lines[-1].endswith("-"):
-                    cur_lines[-1] = cur_lines[-1][:-1] + text
-                else:
-                    cur_lines.append(text)
-                # Heuristic paragraph break: empty line or explicit end-of-paragraph punctuation
-                if text.endswith(".") or text.endswith(":") or text.endswith(";") or text.endswith("?") or text.endswith("!"):
-                    # If this sentence contains unbalanced math markers, keep collecting
-                    joined = " ".join(cur_lines).strip()
-                    if not self._has_unbalanced_math(joined):
-                        paragraphs.append(joined)
-                        cur_lines = []
-
-            if cur_lines:
-                paragraphs.append(" ".join(cur_lines).strip())
-
-            cleaned_pages[p] = "\n\n".join(paragraphs)
-
-        return cleaned_pages
+    def _validate_document(self, pages: List[str]) -> None:
+        full_text = " ".join(page for page in pages if page).strip()
+        if len(full_text) < 100 or not re.search(r"[A-Za-z0-9]", full_text):
+            raise EmptyDocumentError(
+                f"Parsed document contains insufficient extractable text ({len(full_text)} chars)."
+            )
 
     @staticmethod
-    def _is_page_separator(text: str) -> bool:
-        return bool(re.match(r"^\s*[0-9]+\s*$", text))
+    def _normalize_text(text: str) -> str:
+        return re.sub(r"\s+", " ", text or "").strip()
+
+    @staticmethod
+    def _is_page_number(text: str) -> bool:
+        return bool(re.match(r"^\s*\d+\s*$", text))
+
+    @staticmethod
+    def _is_paragraph_break(text: str) -> bool:
+        return bool(text.endswith(".") or text.endswith("?") or text.endswith("!") or text.endswith(":") or text.endswith(";"))
 
     @staticmethod
     def _has_unbalanced_math(text: str) -> bool:
-        # detect unmatched $ or $$ or \[ \]
         single = text.count("$") % 2 != 0
-        display = (text.count("$$") % 2 != 0)
-        bracket = (text.count("\\[") != text.count("\\]"))
+        display = text.count("$$") % 2 != 0
+        bracket = text.count("\\[") != text.count("\\]")
         return single or display or bracket
 
 
-__all__ = ["PDFLayoutParser", "PageBlock"]
+__all__ = ["PDFLayoutParser", "PageBlock", "EmptyDocumentError"]
