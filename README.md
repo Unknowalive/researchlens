@@ -102,3 +102,7 @@ for i, page in enumerate(pages):
 This repository now focuses on a manual, transparent RAG backend (no extractive QA). The generative QA stage is strictly instructed to synthesize answers only from provided context chunks and to include explicit SOURCES mapping.
 
 **Attribution:** This work is an update based on the original repository at https://github.com/DeekshaChat/researchlens/ and includes modifications made locally for the Research Lens backend.
+<<<<<<< HEAD
+=======
+
+>>>>>>> d152dbb (docs: add attribution noting updates based on DeekshaChat/researchlens)
