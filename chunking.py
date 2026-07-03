@@ -36,7 +36,7 @@ def semantic_chunk(text: str, source: str = "", max_sentences: int = 8) -> List[
 
     - Splits on paragraph boundaries first (double newlines).
     - Uses SpaCy sentencizer to avoid breaking sentences.
-    - Ensures math delimiters ($, $$, \[ \]) and citation tokens are not split across chunks.
+    - Ensures math delimiters ($, $$, \\[ \\]) and citation tokens are not split across chunks.
     """
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     chunks: List[Chunk] = []

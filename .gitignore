@@ -1,0 +1,13 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Temporary files
+*~
+*.swp
+
+# Local test artifacts
+test_minimal.pdf
+test_pdf_test.py

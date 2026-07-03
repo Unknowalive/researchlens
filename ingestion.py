@@ -63,32 +63,38 @@ class PDFLayoutParser:
 
     def _parse_with_pdfplumber(self, path: str) -> List[str]:
         blocks_by_page: Dict[int, List[PageBlock]] = collections.defaultdict(list)
-        with pdfplumber.open(path) as pdf:
-            for i, page in enumerate(pdf.pages, start=1):
-                # extract words with bounding boxes
-                words = page.extract_words(use_text_flow=True)
-                if not words:
-                    # fallback to simple text
-                    text = page.extract_text() or ""
-                    blocks_by_page[i].append(PageBlock(text=text.strip(), x0=0, top=0, x1=page.width, bottom=page.height, page_no=i))
-                    continue
-
-                # group words into lines by their top coordinate
-                lines: Dict[int, List[dict]] = collections.defaultdict(list)
-                for w in words:
-                    top_rounded = int(round(float(w.get("top", 0))))
-                    lines[top_rounded].append(w)
-
-                for top_k in sorted(lines.keys()):
-                    line_words = sorted(lines[top_k], key=lambda w: float(w.get("x0", 0)))
-                    text = " ".join(w.get("text", "") for w in line_words).strip()
-                    if not text:
+        try:
+            with pdfplumber.open(path) as pdf:
+                for i, page in enumerate(pdf.pages, start=1):
+                    # extract words with bounding boxes
+                    words = page.extract_words(use_text_flow=True)
+                    if not words:
+                        # fallback to simple text
+                        text = page.extract_text() or ""
+                        blocks_by_page[i].append(PageBlock(text=text.strip(), x0=0, top=0, x1=page.width, bottom=page.height, page_no=i))
                         continue
-                    x0 = float(line_words[0].get("x0", 0))
-                    x1 = float(line_words[-1].get("x1", 0))
-                    top = float(line_words[0].get("top", 0))
-                    bottom = float(line_words[0].get("bottom", page.height))
-                    blocks_by_page[i].append(PageBlock(text=text, x0=x0, top=top, x1=x1, bottom=bottom, page_no=i))
+
+                    # group words into lines by their top coordinate
+                    lines: Dict[int, List[dict]] = collections.defaultdict(list)
+                    for w in words:
+                        top_rounded = int(round(float(w.get("top", 0))))
+                        lines[top_rounded].append(w)
+
+                    for top_k in sorted(lines.keys()):
+                        line_words = sorted(lines[top_k], key=lambda w: float(w.get("x0", 0)))
+                        text = " ".join(w.get("text", "") for w in line_words).strip()
+                        if not text:
+                            continue
+                        x0 = float(line_words[0].get("x0", 0))
+                        x1 = float(line_words[-1].get("x1", 0))
+                        top = float(line_words[0].get("top", 0))
+                        bottom = float(line_words[0].get("bottom", page.height))
+                        blocks_by_page[i].append(PageBlock(text=text, x0=x0, top=top, x1=x1, bottom=bottom, page_no=i))
+        except Exception as exc:
+            raise ValueError(
+                f"Failed to parse PDF at {path}: {exc}. "
+                "The file may not be a valid PDF or may contain only scanned images."
+            ) from exc
 
         cleaned = self._process_pages(blocks_by_page)
         pages_text = [cleaned[p] for p in sorted(cleaned.keys())]
