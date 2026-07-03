@@ -25,6 +25,10 @@ class PageBlock:
     page_no: int
 
 
+class EmptyDocumentError(ValueError):
+    """Raised when a PDF contains no extractable body text after layout-aware parsing."""
+
+
 class PDFLayoutParser:
     """Layout-aware PDF parser.
 
@@ -42,8 +46,11 @@ class PDFLayoutParser:
 
     def parse(self, path: str) -> List[str]:
         if _HAS_MARKER:
-            return self._parse_with_marker(path)
-        return self._parse_with_pdfplumber(path)
+            pages = self._parse_with_marker(path)
+        else:
+            pages = self._parse_with_pdfplumber(path)
+        self._validate_document(pages)
+        return pages
 
     def _parse_with_marker(self, path: str) -> List[str]:
         # marker_pdf API details may vary; this is a best-effort adapter.
@@ -99,6 +106,14 @@ class PDFLayoutParser:
         cleaned = self._process_pages(blocks_by_page)
         pages_text = [cleaned[p] for p in sorted(cleaned.keys())]
         return pages_text
+
+    def _validate_document(self, pages_text: List[str]) -> None:
+        full_text = "\n\n".join(pages_text).strip()
+        if not full_text or len(full_text) < 100 or not re.search(r"[A-Za-z0-9]", full_text):
+            raise EmptyDocumentError(
+                f"PDF parsing yielded insufficient extractable text ({len(full_text)} chars). "
+                "This may be a scanned image PDF, invalid file, or a document with only headers/footers."
+            )
 
     def _process_pages(self, blocks_by_page: Dict[int, List[PageBlock]]) -> Dict[int, str]:
         # Identify repeated header/footer candidates

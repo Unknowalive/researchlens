@@ -28,11 +28,13 @@ class Generator:
         self.model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=torch.float16 if "cuda" in self.device else torch.float32, device_map="auto")
 
     PROMPT_TEMPLATE = (
-        "You are a precise research assistant. Use ONLY the provided CONTEXT to answer the QUESTION. "
-        "Do NOT invent facts, speculate, or use knowledge beyond the CONTEXT. If the CONTEXT is insufficient, reply 'Insufficient information in the provided context.'\n\n"
+        "SYSTEM:\nYou are a research assistant. You are provided with context chunks from a PDF. "
+        "Synthesize an answer ONLY using the provided text. If the answer is not in the context, state 'Information not found in document.' "
+        "Append the source metadata to each sentence.\n\n"
         "CONTEXT:\n{context}\n\n"
         "QUESTION:\n{question}\n\n"
-        "INSTRUCTIONS:\n- Synthesize a concise, accurate answer using ONLY the context.\n- Inline-cite relevant chunks by number (e.g., [1], [2]) where appropriate.\n- After the answer, list a SOURCES section mapping each used citation number to its metadata.\n\n"
+        "INSTRUCTIONS:\n- Answer only from the provided context.\n- If context is insufficient, say 'Information not found in document.'\n"
+        "- Cite each sentence with the corresponding source metadata.\n\n"
     )
 
     def synthesize(self, question: str, chunks: List[SourceChunk], max_new_tokens: int = 256, temperature: float = 0.0) -> str:
@@ -40,7 +42,17 @@ class Generator:
         numbered: List[str] = []
         for i, c in enumerate(chunks, start=1):
             meta = c.metadata or {}
-            meta_str = ", ".join(f"{k}={v}" for k, v in meta.items()) if meta else ""
+            if isinstance(meta, dict):
+                source = str(meta.get("source", "")).strip()
+                page = meta.get("page")
+                if source:
+                    meta_str = f"{source}"
+                    if page is not None:
+                        meta_str += f":page={page}"
+                else:
+                    meta_str = str(meta)
+            else:
+                meta_str = str(meta)
             numbered.append(f"[{i}] {c.text}\n--METADATA: {meta_str}")
 
         context_text = "\n\n".join(numbered)

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import List, Sequence, Tuple, Optional, Any
 import numpy as np
 import math
+import re
 
 try:
     import openai
@@ -23,6 +24,20 @@ def _normalize(v: np.ndarray) -> np.ndarray:
     norms = np.linalg.norm(v, axis=1, keepdims=True)
     norms[norms == 0] = 1.0
     return v / norms
+
+
+_REFERENCE_PATTERN = re.compile(
+    r"^\s*(?:\[\d+\]\s+[A-Z][a-z]+,|References|Bibliography|REFERENCES|BIBLIOGRAPHY)",
+    re.MULTILINE,
+)
+
+
+def _is_reference_text(text: str) -> bool:
+    if not text or _REFERENCE_PATTERN.search(text):
+        return True
+    if re.search(r"\[\d+(?:,\s*\d+)*\]\s+[A-Z][a-z]+,", text):
+        return True
+    return False
 
 
 class BGEEmbeddingClient:
@@ -60,9 +75,23 @@ class Retriever:
             raise ValueError("embeddings must be a 2D array")
         if len(chunks) != embeddings.shape[0]:
             raise ValueError("chunks length must match embeddings rows")
-        # Normalize and store
-        self._embeddings = _normalize(embeddings.astype(np.float32))
-        self._chunks = list(chunks)
+
+        filtered: List[IndexedChunk] = []
+        filtered_embeddings: List[np.ndarray] = []
+        for chunk, emb in zip(chunks, embeddings):
+            if _is_reference_text(chunk.text):
+                continue
+            filtered.append(chunk)
+            filtered_embeddings.append(emb)
+
+        if not filtered:
+            self._embeddings = None
+            self._chunks = []
+            return
+
+        embedding_matrix = np.vstack(filtered_embeddings)
+        self._embeddings = _normalize(embedding_matrix.astype(np.float32))
+        self._chunks = filtered
 
     def search(self, query_embeddings: np.ndarray, top_k: int = 5) -> List[List[Tuple[IndexedChunk, float]]]:
         """Vectorized search.
